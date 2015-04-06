@@ -26,7 +26,9 @@ module JenkinsPipelineBuilder
         return [true, nil]
       end
 
-      if JenkinsPipelineBuilder.client.job.exists?(name)
+      if job[:job_type] == 'promotion'
+        JenkinsPipelineBuilder.client.job.set_promote_config(job[:promote], job[:process], xml)
+      elsif JenkinsPipelineBuilder.client.job.exists?(name)
         JenkinsPipelineBuilder.client.job.update(name, xml)
       else
         JenkinsPipelineBuilder.client.job.create(name, xml)
@@ -36,7 +38,6 @@ module JenkinsPipelineBuilder
 
     def to_xml
       fail 'Job name is not specified' unless name
-
       logger.info "Creating Yaml Job #{job}"
       job[:job_type] = 'free_style' unless job[:job_type]
       case job[:job_type]
@@ -50,7 +51,9 @@ module JenkinsPipelineBuilder
         @xml = setup_freestyle_base(job)
         payload = add_job_dsl
       when 'free_style', 'pull_request_generator'
-        payload = setup_freestyle_base job
+        payload = setup_freestyle_base(job)
+      when 'promotion'
+        payload = setup_promotion_base(job)
       else
         return false, "Job type: #{job[:job_type]} is not one of job_dsl, multi_project, build_flow or free_style"
       end
@@ -122,6 +125,14 @@ module JenkinsPipelineBuilder
       JenkinsPipelineBuilder.registry.traverse_registry_path('job', params, n_xml)
       logger.debug 'Module loading complete'
 
+      n_xml.to_xml
+    end
+
+    def setup_promotion_base(params)
+      # Need to create adefault xml setup
+      # then merge with params
+      xml = File.open(params[:xml], 'rb').read
+      n_xml = Nokogiri::XML(xml, &:noblanks)
       n_xml.to_xml
     end
   end
