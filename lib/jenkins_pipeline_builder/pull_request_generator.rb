@@ -22,20 +22,44 @@
 
 module JenkinsPipelineBuilder
   class PullRequestGenerator
-    attr_reader :purge
-    attr_reader :create
-    attr_reader :jobs
+    attr_reader :purge, :create, :jobs, :project, :generator, :pull_generator, :errors, :pull_requests
 
-    def initialize(project, jobs, pull_job)
+    def initialize(project, generator)
+      @project = project
+      @generator = generator
+
       @purge = []
       @create = []
-      @jobs = {}
 
-      pull_requests = check_for_pull pull_job
-      purge_old(pull_requests, project)
-      pull_requests.each do |number|
-        # Manipulate the YAML
-        req = JenkinsPipelineBuilder::PullRequest.new(project, number, jobs, pull_job)
+      @errors = {}
+      @pull_generator = find
+      success, payload = compile_generator
+      unless success
+        @errors[@pull_generator[:name]] = payload
+        return false
+      end
+      @jobs = filter_jobs
+
+      # old init
+      @pull_requests = check_for_pull payload
+      find_old_pull_requests
+      generate_pull_requests
+
+      @generator.job_collection.collection.merge! @jobs
+      @errors.merge! create_jobs
+
+      purge_jobs
+    end
+
+    def valid?
+      errors.empty?
+    end
+
+    private
+
+    def generate_pull_requests
+      @pull_requests.each do |number|
+        req = JenkinsPipelineBuilder::PullRequest.new(project, number, jobs, @pull_generator)
         @jobs.merge! req.jobs
         project_new = req.project
 
@@ -45,7 +69,63 @@ module JenkinsPipelineBuilder
       end
     end
 
-    private
+    def purge_jobs
+      purge.each do |purge_job|
+        jobs = JenkinsPipelineBuilder.client.job.list "#{purge_job}.*"
+        jobs.each do |job|
+          JenkinsPipelineBuilder.client.job.delete job
+        end
+      end
+    end
+
+    def create_jobs
+      errors = {}
+      create.each do |pull_project|
+        success, compiled_project = generator.resolve_project(pull_project)
+        compiled_project[:value][:jobs].each do |i|
+          job = i[:result]
+          job = Job.new job
+          success, payload = job.create_or_update
+          errors[job.name] = payload unless success
+        end
+      end
+      errors
+    end
+
+    def filter_jobs
+      jobs = {}
+      pull_jobs = pull_generator[:value][:jobs] || []
+      pull_jobs.each do |job|
+        if job.is_a? String
+          jobs[job.to_s] = generator.job_collection.collection[job.to_s]
+        else
+          jobs[job.keys.first.to_s] = generator.job_collection.collection[job.keys.first.to_s]
+        end
+      end
+      fail 'No jobs found for pull request' if jobs.empty?
+      jobs
+    end
+
+    def compile_generator
+      defaults = generator.job_collection.defaults
+      settings = defaults.nil? ? {} : defaults[:value] || {}
+      compiler = Compiler.new generator
+      settings = compiler.get_settings_bag(project, settings)
+      generator.resolve_job_by_name(pull_generator[:name], settings)
+    end
+
+    def find
+      project_jobs = project[:value][:jobs] || []
+      pull_job = nil
+      project_jobs.each do |job|
+        job = job.keys.first if job.is_a? Hash
+        job = generator.job_collection.collection[job.to_s]
+
+        pull_job = job if job[:value][:job_type] == 'pull_request_generator'
+      end
+      fail 'No jobs of type pull_request_generator found' unless pull_job
+      pull_job
+    end
 
     # Check for Github Pull Requests
     #
@@ -64,10 +144,10 @@ module JenkinsPipelineBuilder
       pulls.map { |p| p['number'] }
     end
 
-    # Purge old builds
-    def purge_old(pull_requests, project)
+    def find_old_pull_requests
       reqs = pull_requests.clone.map { |req| "#{project[:name]}-PR#{req}" }
       # Read File
+      # FIXME: Shouldn't this be opening just with read permissions?
       old_requests = File.new('pull_requests.csv', 'a+').read.split(',')
 
       # Pop off current pull requests

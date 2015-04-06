@@ -1,11 +1,7 @@
 require File.expand_path('../spec_helper', __FILE__)
 
 describe JenkinsPipelineBuilder::Generator do
-  after :each do
-    JenkinsPipelineBuilder.registry.clear_versions
-  end
-
-  before(:all) do
+  before :all do
     JenkinsPipelineBuilder.credentials = {
       server_ip: '127.0.0.1',
       server_port: 8080,
@@ -13,11 +9,17 @@ describe JenkinsPipelineBuilder::Generator do
       password: 'password',
       log_location: '/dev/null'
     }
+  end
+
+  after :each do
+    JenkinsPipelineBuilder.registry.clear_versions
+  end
+
+  before :each do
     @generator = JenkinsPipelineBuilder.generator
   end
 
   after(:each) do
-    JenkinsPipelineBuilder.no_debug!
     @generator.job_collection = JenkinsPipelineBuilder::JobCollection.new
   end
 
@@ -109,80 +111,37 @@ describe JenkinsPipelineBuilder::Generator do
 
   describe '#pull_request' do
     before :each do
-      allow(JenkinsPipelineBuilder.client).to receive(:plugin).and_return double(
-        list_installed: { 'description' => '20.0', 'git' => '20.0' })
-      JenkinsPipelineBuilder.debug!
+      allow(JenkinsPipelineBuilder).to receive(:debug).and_return true
+      JenkinsPipelineBuilder.registry.registry[:job][:scm_params].installed_version = '1000.0'
     end
-    let(:jobs) do
-      {
-        '{{name}}-10-SampleJob' => {
-          name: '{{name}}-10-SampleJob',
-          type: :job,
-          value: {
-            name: '{{name}}-10-SampleJob',
-            scm_branch: 'origin/pr/{{pull_request_number}}/head',
-            scm_params: {
-              refspec: 'refs/pull/*:refs/remotes/origin/pr/*'
-            }
-          }
-        }
-      }
+    after :each do
+      JenkinsPipelineBuilder.registry.registry[:job][:scm_params].clear_installed_version
     end
+
     let(:path) { File.expand_path('../fixtures/generator_tests/pullrequest_pipeline', __FILE__) }
     it 'produces no errors while creating pipeline PullRequest' do
-      # Dummy data
-      purge = []
-      create = [
-        {
-          name: 'PullRequest-PR1',
-          type: :project,
-          value: {
-            name: 'PullRequest-PR1',
-            pull_request_number: '1',
-            jobs: [
-              '{{name}}-10-SampleJob'
-            ]
-          }
-        }
-      ]
-      # Run the test
       job_name = 'PullRequest'
-      expect(JenkinsPipelineBuilder::PullRequestGenerator).to receive(:new).once.and_return(
-        double(purge: purge, create: create, jobs: jobs)
-      )
+      allow_any_instance_of(JenkinsPipelineBuilder::PullRequestGenerator).to receive(:check_for_pull).and_return([1])
+      allow_any_instance_of(JenkinsPipelineBuilder::PullRequestGenerator).to receive(:purge_jobs).and_return(true)
       success = @generator.pull_request(path, job_name)
       expect(success).to be_truthy
     end
 
-    it 'correclty creates jobs when there are multiple pulls open' do
-      purge = []
-      create = %w(1 2).map do |n|
-        {
-          name: "PullRequest-PR#{n}",
-          type: :project,
-          value: {
-            pull_request_number: n,
-            name: "PullRequest-PR#{n}",
-            jobs: [
-              '{{name}}-10-SampleJob'
-            ]
-          }
-        }
-      end
+    it 'correctly creates jobs when there are multiple pulls open' do
       job_name = 'PullRequest'
-      expect(JenkinsPipelineBuilder::PullRequestGenerator).to receive(:new).once.and_return(
-        double(purge: purge, create: create, jobs: jobs)
-      )
+      allow_any_instance_of(JenkinsPipelineBuilder::PullRequestGenerator).to receive(:check_for_pull).and_return([1, 2])
       job1 = double name: 'job name'
       job2 = double name: 'job name'
       expect(JenkinsPipelineBuilder::Job).to receive(:new).once.with(
         name: 'PullRequest-PR1-10-SampleJob', scm_branch: 'origin/pr/1/head', scm_params: {
-          refspec: 'refs/pull/*:refs/remotes/origin/pr/*'
+          refspec: 'refs/pull/1/head:refs/remotes/origin/pr/1/head',
+          changelog_to_branch: { remote: 'origin', branch: 'pr/1/head' }
         }
       ).and_return job1
       expect(JenkinsPipelineBuilder::Job).to receive(:new).once.with(
         name: 'PullRequest-PR2-10-SampleJob', scm_branch: 'origin/pr/2/head', scm_params: {
-          refspec: 'refs/pull/*:refs/remotes/origin/pr/*'
+          refspec: 'refs/pull/2/head:refs/remotes/origin/pr/2/head',
+          changelog_to_branch: { remote: 'origin', branch: 'pr/2/head' }
         }
       ).and_return job2
       expect(job1).to receive(:create_or_update).and_return true
@@ -195,7 +154,7 @@ describe JenkinsPipelineBuilder::Generator do
     # Fails to purge old PR jobs from Jenkins
   end
 
-  describe '#load_collection_from_path' do
+  describe '#load_from_path' do
     let(:project_hash) do
       [{ 'defaults' => { 'name' => 'global', 'description' => 'Tests, all the tests' } },
        { 'project' => { 'name' => 'TestProject', 'jobs' => ['{{name}}-part1'] } }]
@@ -206,28 +165,23 @@ describe JenkinsPipelineBuilder::Generator do
       }]
     end
 
-    before :each do
-      expect(@generator.job_collection).to receive(:load_file).once.with(view_hash, false).and_return(true)
-      expect(@generator.job_collection).to receive(:load_file).once.with(project_hash, false).and_return(true)
-    end
-
     it 'loads a yaml collection from a path' do
       path = File.expand_path('../fixtures/generator_tests/test_yaml_files', __FILE__)
-      @generator.job_collection.send(:load_from_path, path)
+      @generator.job_collection.load_from_path path
     end
     it 'loads a json collection from a path' do
       path = File.expand_path('../fixtures/generator_tests/test_json_files', __FILE__)
-      @generator.job_collection.send(:load_from_path, path)
+      @generator.job_collection.load_from_path path
     end
     it 'loads both yaml and json files from a path' do
       path = File.expand_path('../fixtures/generator_tests/test_combo_files', __FILE__)
-      @generator.job_collection.send(:load_from_path, path)
+      @generator.job_collection.load_from_path path
     end
   end
 
   describe '#dump' do
     it "writes a job's config XML to a file" do
-      JenkinsPipelineBuilder.debug!
+      allow(JenkinsPipelineBuilder).to receive(:debug).and_return true
       job_name = 'test_job'
       body = ''
       test_path = File.expand_path('../fixtures/generator_tests', __FILE__)
